@@ -564,6 +564,86 @@ def run_command(args: argparse.Namespace) -> None:
     Typical CLI usage:
         $ boltzgen run path/to/design.yaml --output out_dir --protocol protein-anything
     """
+
+    # ==========================================================================
+    # GOAL 4: TEAM DEFAULTS — read from run_params.json if it exists,
+    # otherwise fall back to hardcoded defaults below.
+    #
+    # Priority order (highest to lowest):
+    #   1. CLI flags passed explicitly by the user / server
+    #   2. run_params.json in the current working directory
+    #   3. Hardcoded defaults below
+    #
+    # To use a JSON file: place run_params.json in the directory where you
+    # run boltzgen, or set BOLTZGEN_PARAMS_FILE env var to a custom path.
+    # ==========================================================================
+    import json
+
+    # --- Load run_params.json if it exists ---
+    params_file = Path(
+        os.environ.get("BOLTZGEN_PARAMS_FILE", "run_params.json")
+    )
+    run_params = {}
+    if params_file.exists():
+        with open(params_file) as f:
+            run_params = json.load(f)
+        print(f"\n[CONFIG] Loaded run parameters from: {params_file}")
+    else:
+        print(f"\n[CONFIG] No run_params.json found, using hardcoded defaults.")
+
+    def _get(section, key, default):
+        """Get a value from run_params.json, falling back to default if null or missing."""
+        val = run_params.get(section, {}).get(key)
+        return default if val is None else val
+
+    # --- Core paths ---
+    args.protocol = _get("general", "protocol", "protein-anything")
+
+    args.output = Path(
+        _get("general", "output", "/home/alfred.tan/boltzgen/output/test_run")
+    )
+
+    # Default design spec: vanilla protein example for smoke tests.
+    # In production, pass your actual target_spec YAML as a CLI argument
+    # or set it via the YAML path in the Beaker experiment spec.
+    args.design_spec = [Path(
+        _get("general", "design_spec",
+             "/home/alfred.tan/boltzgen/example/vanilla_protein/1g13prot.yaml")
+    )]
+
+    # Cache: where model weights (~6GB) live on the host filesystem.
+    # Persists across runs so weights don't re-download every time.
+    if args.cache is None:
+        args.cache = Path(
+            _get("general", "cache", "/home/alfred.tan/boltzgen/cache")
+        )
+
+    # --- Design parameters ---
+    # num_designs: 10 for smoke tests, 10000-60000 for production
+    if args.num_designs == 10000:
+        args.num_designs = _get("design", "num_designs", 10)
+
+    # budget: how many final designs to keep after filtering
+    if args.budget == 30:
+        args.budget = _get("design", "budget", 2)
+
+    # --- Compute resources ---
+    if args.num_workers == 1:
+        args.num_workers = _get("general", "num_workers", 4)
+
+    if args.devices is None:
+        args.devices = _get("general", "devices", 1)
+
+    # Print resolved config so it's visible in Beaker logs
+    print(f"[CONFIG] protocol      = {args.protocol}")
+    print(f"[CONFIG] output        = {args.output}")
+    print(f"[CONFIG] design_spec   = {args.design_spec}")
+    print(f"[CONFIG] cache         = {args.cache}")
+    print(f"[CONFIG] num_designs   = {args.num_designs}")
+    print(f"[CONFIG] budget        = {args.budget}")
+    print(f"[CONFIG] num_workers   = {args.num_workers}")
+    print(f"[CONFIG] devices       = {args.devices}")
+
     # Validate required arguments for running from design specs
     if not args.output:
         print("No output directory specified. Exiting.")
@@ -824,6 +904,74 @@ def execute_command(args: argparse.Namespace) -> None:
 
         elapsed = time.time() - start
         print(f"✓ Step {step_name} completed successfully in {elapsed:.1f}s")
+
+        # ======================================================================
+        # GOAL 3: BINDER LOGGING — print passing binders after filtering
+        # After the filtering step completes, read the output CSV and print
+        # the name + sequence of every binder that passed filters.
+        #
+        # Only prints NEWLY generated binders (ones not seen in previous runs).
+        # This matters when using --reuse, where some designs already existed.
+        # ======================================================================
+        if step_name == "filtering":
+            # The metrics CSV lives in final_ranked_designs/ inside the output dir
+            # args.output is the top-level output directory
+            output_dir = args.output
+            metrics_csv = output_dir / "final_ranked_designs" / "all_designs_metrics.csv"
+
+            if metrics_csv.exists():
+                import pandas as pd
+
+                df = pd.read_csv(metrics_csv)
+
+                # Filter for binders that passed all filters
+                if 'pass_filters' in df.columns:
+                    passed = df[df['pass_filters'] == True].copy()
+                else:
+                    # Fallback: if no pass_filters column, show all rows
+                    passed = df.copy()
+
+                # --- Track only NEWLY generated binders ---
+                # We keep a set of IDs we've already printed across loop iterations.
+                # On first call this set doesn't exist yet, so we create it.
+                if not hasattr(args, '_logged_binder_ids'):
+                    args._logged_binder_ids = set()
+
+                # Find the ID column (try common names)
+                id_col = next(
+                    (c for c in ['id', 'design_name', 'name', 'design_id'] if c in passed.columns),
+                    passed.columns[0]  # fall back to first column
+                )
+
+                # Find the sequence column (try common names)
+                seq_col = next(
+                    (c for c in ['design_sequence', 'sequence', 'seq', 'binder_sequence'] if c in passed.columns),
+                    None
+                )
+
+                # Only print binders we haven't logged before
+                new_binders = passed[~passed[id_col].astype(str).isin(args._logged_binder_ids)]
+
+                print("\n" + "=" * 60)
+                print(f"FILTERING COMPLETE — {len(passed)} total binders passed filters")
+                print(f"  ({len(new_binders)} newly generated this run)")
+                print("=" * 60)
+
+                for _, row in new_binders.iterrows():
+                    name = str(row[id_col])
+                    seq = str(row[seq_col]) if seq_col else "sequence column not found"
+                    print(f"  Binder: {name} | Sequence: {seq}")
+                    args._logged_binder_ids.add(name)  # mark as logged
+
+                if len(new_binders) == 0:
+                    print("  (no new binders this iteration)")
+
+                print("=" * 60 + "\n")
+
+            else:
+                print(f"\n[BINDER LOG] Filtering complete but no metrics CSV found at:")
+                print(f"  {metrics_csv}")
+                print(f"  (this is expected on a failed or interrupted run)\n")
 
     if "BOLTZGEN_PIPELINE_PROGRESS" in os.environ:
         del os.environ["BOLTZGEN_PIPELINE_PROGRESS"]

@@ -1,0 +1,45 @@
+entities:
+  # -------------------------------------------------------------------------
+  # THE BINDER
+  # Length range is set in run_params.json (binder_length_min/max).
+  # The sequence field here will be auto-populated from those values
+  # when the pipeline reads run_params.json.
+  # To set manually, replace BINDER_LENGTH_MIN..BINDER_LENGTH_MAX with
+  # e.g. 80..140
+  # -------------------------------------------------------------------------
+  - protein:
+      id: C
+      sequence: BINDER_LENGTH_MIN..BINDER_LENGTH_MAX
+
+  # -------------------------------------------------------------------------
+  # THE TARGET
+  # Fill in path, chain, cropping range, and optionally hotspots.
+  #
+  # PATH: relative to the location of this yaml file.
+  #   e.g. if this yaml is at targets/pdl1/target_spec.yaml,
+  #   then path: pdl1.cif means targets/pdl1/pdl1.cif
+  #
+  # RESIDUE INDEXING: always use label_asym_id (NOT auth_asym_id).
+  #   Check in Mol* viewer: https://molstar.org/viewer/
+  #   Hover over a residue → use the index shown bottom-right.
+  # -------------------------------------------------------------------------
+  - file:
+      path: TARGET_CIF_FILENAME.cif    # UPDATE: e.g. pdl1.cif
+
+      include:
+        - chain:
+            id: A                      # UPDATE: chain to design against
+            res_index: START..END      # UPDATE: e.g. 1..200 (crop to relevant domain)
+
+      # -----------------------------------------------------------------------
+      # HOTSPOT (optional — delete this section for no-hotspot runs)
+      # Residues the binder MUST interact with.
+      # For automated hotspot detection, use fpocket, SiteMap, or P2Rank
+      # on the CIF file to predict binding pockets.
+      # -----------------------------------------------------------------------
+      binding_types:
+        - chain:
+            id: A
+            binding: HOTSPOT_RESIDUES  # UPDATE: e.g. 45..52,67
+                                       # DELETE this whole binding_types section
+                                       # if you want a no-hotspot run
